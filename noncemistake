@@ -1,0 +1,222 @@
+#!/usr/bin/python
+
+"""Noncemistake
+
+This is a game that will allow you to break AES-CTR encrypted fortunes
+where the key, nonce and counter are the same for all fortunes.
+
+Navigate with the arrow keys, and enter the character you want in the
+highlighted cell.  The rest of the row will update to suit.
+
+The ctrl key will toggle hex mode - all cells will display in hex, and
+you may simply enter 2 hex characters to change the value of the current
+cell.
+
+We lose the AES key as soon as the ciphertexts are created, so the only
+way the game can cheat for you is to do statistical analysis of a column.
+Hit F1 to cheat.
+
+If you don't want to cheat, there's still a better way to do this than
+guess random characters. Since this is an XOR cipher, you can consider
+the bits to be columns - for letters bit 5 is uppercase or lowercase, and
+for all ASCII, bit 7 is clear.  Try hex mode, it may help if you're that
+way inclined. CTRL toggles hex mode.
+
+REQUIREMENTS:
+
+- Python 2.x, where x is probably 7
+- Pygame
+- python-crypto
+- "fortune" installed and in your path.  Get more than just fortunes-min
+  if your flight is expected to take more than an hour.
+- A system font calls "Sans"
+"""
+
+
+# The future's calling, but pygame don't hear it
+from __future__ import division, generators, nested_scopes, print_function, with_statement, unicode_literals
+import pygame
+import numpy
+from pygame.locals import *
+from mikcryptoolkit.data import *
+from mikcryptoolkit.blockcipher import ctr_encrypt
+from mikcryptoolkit import confidence
+import subprocess
+import string
+import operator
+
+def create_plaintext(x):
+	ascii_plaintext = unicode(subprocess.check_output(["fortune", "-s"]))
+	ascii_plaintext = u"".join([ line.strip() for line in ascii_plaintext.split('\n') ])[:x]
+	return from_ascii(ascii_plaintext)
+
+def create_ciphertexts(x, y):
+	plaintexts = [ create_plaintext(x) for _ in range(y) ]
+	key = random_bytes(16)
+	return [
+		ctr_encrypt(x, key, 0)
+		for x in plaintexts
+	]
+
+class Noncemistake(object):
+	XSIZE = 1280
+	YSIZE = 720
+
+	XTILES = 56 # How many chars per ciphertext (max)
+	YTILES = 40 # How many ciphertexts (more is easier!)
+	BORDER = 2
+	FPS=30
+
+	BGCOLOUR=pygame.Color(145, 190, 222, 255)
+	INACTIVE_COLOUR=pygame.Color(245, 245, 245, 255)
+	ACTIVE_COLUMN_COLOUR=pygame.Color(255, 255, 204, 255)
+	ACTIVE_TILE_COLOUR=pygame.Color(255, 222, 123, 255)
+	FONT_COLOUR=pygame.Color(0, 0, 0, 255)
+	HEX_FONT_COLOUR=pygame.Color(0, 0, 200, 255)
+
+
+	def __init__(self):
+		self.TILE_WIDTH = (self.XSIZE / self.XTILES) - self.BORDER
+		self.TILE_HEIGHT = (self.YSIZE / self.YTILES) - self.BORDER
+		self.hexMode = False
+
+		self.ciphertexts = create_ciphertexts(self.XTILES, self.YTILES)
+		self.xpos = self.ypos = 0
+
+		pygame.init()
+		self.surface = pygame.display.set_mode((self.XSIZE, self.YSIZE), 0, 32)
+		self.FONT=pygame.font.SysFont("Sans", int(self.TILE_HEIGHT * 0.9), bold=True)
+		self.fpsClock = pygame.time.Clock()
+		pygame.key.set_repeat(150, 75)
+
+		self.clearHex()
+
+	def mainloop(self):
+		while True:
+			for event in pygame.event.get():
+				if event.type == QUIT:
+					pygame.quit()
+					sys.exit()
+				elif event.type == KEYDOWN:
+					self.handle_keydown(event)
+			self.surface.fill(self.BGCOLOUR)
+			self.drawBoard()
+			pygame.display.update()
+			self.fpsClock.tick(self.FPS)
+
+
+
+	def handle_keydown(self, event):
+		if event.key == K_ESCAPE:
+			pygame.quit()
+			sys.exit()
+		elif event.key == K_LEFT:
+			self.xpos = (self.xpos - 1) % self.XTILES
+		elif event.key == K_RIGHT:
+			self.xpos = (self.xpos + 1) % self.XTILES
+		elif event.key == K_UP:
+			self.ypos = (self.ypos - 1) % self.YTILES
+		elif event.key == K_DOWN:
+			self.ypos = (self.ypos + 1) % self.YTILES
+		elif event.key == K_HOME:
+			self.xpos = 0
+		elif event.key == K_END:
+			self.xpos = self.XTILES-1
+		elif event.key == K_PAGEDOWN:
+			self.ypos = self.YTILES-1
+		elif event.key == K_PAGEUP:
+			self.ypos = 0
+		elif event.key in (K_LCTRL, K_RCTRL):
+			if self.hexMode:
+				self.hexMode = False
+			else:
+				self.hexMode = True
+		elif event.key == K_F1:
+			self.autoSolve()
+		elif event.key == K_F5:
+			self.ciphertexts = create_ciphertexts(self.XTILES, self.YTILES)
+		elif self.xpos < self.ciphertexts[self.ypos].size:
+			code = self.convert_keyevent(event)
+			if code is not None:
+				xor_mask = self.ciphertexts[self.ypos][self.xpos] ^ code
+				for i in range(len(self.ciphertexts)):
+					if self.xpos < self.ciphertexts[i].size:
+						self.ciphertexts[i][self.xpos] ^= xor_mask
+			return # Don't clear hex accumulator
+		self.clearHex()
+
+	def holdHex(self, s):
+		self.hexAccum = s
+		pygame.display.set_caption("Noncemistake : CTRL=Toggle Hex : F1=Solve Column : F5=New [" + self.hexAccum + "]")
+
+	def clearHex(self):
+		self.hexAccum = ''
+		pygame.display.set_caption("Noncemistake : CTRL=Toggle Hex : F1=Solve Column : F5=New")
+
+	def convert_keyevent(self, event):
+		if self.hexMode:
+			if event.unicode in string.hexdigits:
+				if len(self.hexAccum) == 1:
+					ret = int(self.hexAccum+event.unicode, 16)
+					self.clearHex()
+					return ret
+				else:
+					self.holdHex(event.unicode)
+			else:
+				self.clearHex()
+		else:
+			if len(event.unicode) > 0:
+				return ord(event.unicode)
+
+	def autoSolve(self):
+		d = numpy.array([ c[self.xpos] for c in self.ciphertexts if c.size > self.xpos ])
+
+		xor_mask = sorted(
+			[
+				(x, fortune_score(x ^ d))
+				for x
+				in numpy.arange(256, dtype=numpy.uint8)
+			], key=operator.itemgetter(1))[-1][0]
+		for i in range(len(self.ciphertexts)):
+			if self.xpos < self.ciphertexts[i].size:
+				self.ciphertexts[i][self.xpos] ^= xor_mask
+
+	def get_box_colour(self, x, y):
+		if x == self.xpos:
+			if y == self.ypos:
+				return self.ACTIVE_TILE_COLOUR
+			else:
+				return self.ACTIVE_COLUMN_COLOUR
+		else:
+			return self.INACTIVE_COLOUR
+
+	def drawBoard(self):
+		for boxx in range(self.XTILES):
+			for boxy in range(self.YTILES):
+				if self.ciphertexts[boxy].size > boxx:
+					left = boxx * (self.TILE_WIDTH + self.BORDER) + (self.BORDER / 2)
+					top = boxy * (self.TILE_HEIGHT + self.BORDER) + (self.BORDER / 2)
+					pygame.draw.rect(
+						self.surface,
+						self.get_box_colour(boxx, boxy),
+						(left, top, self.TILE_WIDTH, self.TILE_HEIGHT)
+					)
+					c = chr(self.ciphertexts[boxy][boxx])
+					fontcolour = self.FONT_COLOUR
+					if c not in string.printable or self.hexMode:
+						c = "{0:02x}".format(self.ciphertexts[boxy][boxx])
+						fontcolour = self.HEX_FONT_COLOUR
+					textSurface = self.FONT.render(c, True, fontcolour)
+					textRect = textSurface.get_rect()
+					textRect.center = (
+						left + (self.TILE_WIDTH // 2), 
+						top + (self.TILE_HEIGHT // 2)
+					)
+					self.surface.blit(textSurface, textRect)
+
+fortune_score = confidence.from_fortunes()
+
+
+if __name__ == "__main__":
+	Noncemistake().mainloop()
+
